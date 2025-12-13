@@ -1,10 +1,54 @@
 import re
 import nltk
-
-
 nltk.download('punkt', quiet=True)
 
-# -------------------- Parentheses validation --------------------
+# -------------------- LLM Setup (Open-Source) ----------------------
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
+# Load open-source LLM 
+model_name = "facebook/opt-125m"   #
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
+llm_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer, max_length=128)
+
+# Cache for translations to avoid repeated LLM calls
+mesh_cache = {}
+
+def translate_mesh_term(term):
+    if term in mesh_cache:
+        return mesh_cache[term]
+
+    prompt = f"""
+Translate this MeSH term into equivalent controlled vocabulary terms for multiple databases:
+
+MeSH term: {term}
+
+Format the output as JSON with keys: "Cochrane", "Embase", "Scopus", "Web of Science".
+Example:
+
+Input: asthma
+Output: {{"Cochrane": "Asthma", "Embase": "Asthma/exp", "Scopus": "Asthma", "Web of Science": "Respiratory Disease"}}
+
+Input: {term}
+Output:
+"""
+    result = llm_pipeline(prompt, max_length=200, do_sample=False)
+    # Extract JSON-like output from generated text
+    generated_text = result[0]['generated_text'].split("Output:")[-1].strip()
+    try:
+        translation = eval(generated_text)  # convert string to dict
+    except:
+        translation = {
+            "Cochrane": term,
+            "Embase": term,
+            "Medline": term,
+        
+        }
+    mesh_cache[term] = translation
+    return translation
+
+
+# -------------------- Parentheses validation ----------------------
 def validate_parentheses(query):
     stack = []
     for char in query:
@@ -15,9 +59,9 @@ def validate_parentheses(query):
                 return False
             stack.pop()
     return len(stack) == 0
-# ----------------------------------------------------------------
 
-# -------------------- Normalize query --------------------------
+
+# -------------------- Normalize query -----------------------------
 def normalize_query(query):
     query = query.strip()
     query = re.sub(r"\s+", " ", query)
@@ -25,13 +69,13 @@ def normalize_query(query):
     return query
 
 
-# -------------------- Tokenization -----------------------------
+# -------------------- Tokenization --------------------------------
 def tokenize_query(query):
     token_pattern = r'\(|\)|\[[^\]]*\]|"[^"]*"|\w+'
     return re.findall(token_pattern, query)
-# ----------------------------------------------------------------
 
-# -------------------- Merge consecutive TERMS into PHRASE -------
+
+# -------------------- Merge consecutive TERMS into PHRASE ---------
 def merge_terms(tokens):
     merged_tokens = []
     buffer = []
@@ -50,10 +94,12 @@ def merge_terms(tokens):
     return merged_tokens
 
 
-# -------------------- Token classification ---------------------
+# -------------------- Token classification ------------------------
 def classify_tokens(tokens):
     token_stream = []
     for token in tokens:
+        token_type = ''
+        source = ''
         if token in ['AND', 'OR', 'NOT']:
             token_type = 'BOOLEAN'
             value = token
@@ -63,6 +109,10 @@ def classify_tokens(tokens):
         elif token == ')':
             token_type = 'RPAREN'
             value = token
+        elif re.match(r'\[MeSH Terms\]', token):
+            token_type = 'FIELD_TAG'
+            value = token
+            source = 'MeSH'
         elif re.match(r'\[[^\]]*\]', token):
             token_type = 'FIELD_TAG'
             value = token
@@ -72,9 +122,13 @@ def classify_tokens(tokens):
         else:
             token_type = 'PHRASE'
             value = token
-        token_stream.append({"token": token, "type": token_type, "value": value})
+
+        token_dict = {"token": token, "type": token_type, "value": value}
+        if source:
+            token_dict['source'] = source
+        token_stream.append(token_dict)
     return token_stream
-# ----------------------------------------------------------------
+# -------------------------------------------------------------------
 
 def process_query(query):
     if not validate_parentheses(query):
@@ -85,9 +139,9 @@ def process_query(query):
     tokens = tokenize_query(query)
     tokens = merge_terms(tokens)
     return classify_tokens(tokens)
+# -------------------------------------------------------------------
 
-
-# Database-specific field mapping
+# -------------------- Database-specific field mapping -------------
 FIELD_MAPPING = {
     'cochrane': {
         '[TIAB]': ':ti,ab',
@@ -100,12 +154,20 @@ FIELD_MAPPING = {
     'embase': {
         '[TIAB]': ':ti,ab',
         '[MeSH Terms]': '/exp',
-    }
+    },
+    
 }
+# -------------------------------------------------------------------
 
 def map_token_to_db(token, db):
     ttype = token['type']
     value = token['value']
+
+    # ----------------- Semantic translation for MeSH terms ----------
+    if ttype == 'PHRASE' and token.get('source') == 'MeSH':
+        translation = translate_mesh_term(value)
+        return translation.get(db.capitalize(), value)
+    # ----------------------------------------------------------------
 
     if ttype == 'PHRASE':
         if db == 'embase':
@@ -113,7 +175,7 @@ def map_token_to_db(token, db):
         else:
             return f'"{value}"'
     elif ttype == 'FIELD_TAG':
-        return FIELD_MAPPING[db].get(value, value)
+        return FIELD_MAPPING.get(db, {}).get(value, value)
     elif ttype == 'BOOLEAN':
         return value
     elif ttype in ['LPAREN', 'RPAREN']:
@@ -127,16 +189,19 @@ def map_token_to_db(token, db):
 def reconstruct_query(tokens, db):
     mapped_tokens = [map_token_to_db(t, db) for t in tokens]
     return ' '.join(mapped_tokens)
+# -------------------------------------------------------------------
 
+# -------------------- Main program --------------------------------
 if __name__ == "__main__":
     user_query = input("Enter PubMed query: ")
 
     structured_tokens = process_query(user_query)
 
     outputs = {}
-    for db in ['cochrane', 'medline', 'embase']:
+    for db in ['cochrane', 'embase', 'medline']:
         outputs[db] = reconstruct_query(structured_tokens, db)
 
     print("\nTranslated Queries:")
     for db, q in outputs.items():
         print(f"{db.upper()}: {q}")
+# -------------------------------------------------------------------
