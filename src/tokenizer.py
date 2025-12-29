@@ -1,207 +1,271 @@
+import os
 import re
+import json
 import nltk
 nltk.download('punkt', quiet=True)
 
-# -------------------- LLM Setup (Open-Source) ----------------------
+# Silence HF tokenizer warning
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# -------------------- Optional LLM Setup ----------------------
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
-# Load open-source LLM 
-model_name = "facebook/opt-125m"   #
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
-llm_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer, max_length=128)
+# Lazy LLM (can be skipped for testing)
+llm_pipeline = None
+def get_llm():
+    global llm_pipeline
+    if llm_pipeline is None:
+        model_name = "facebook/opt-125m"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForCausalLM.from_pretrained(model_name)
+        llm_pipeline = pipeline("text-generation", model=model, tokenizer=tokenizer, max_length=128)
+    return llm_pipeline
 
-# Cache for translations to avoid repeated LLM calls
+# -------------------- MeSH translation -----------------------
 mesh_cache = {}
 
-def translate_mesh_term(term):
+def translate_mesh_term(term, use_llm=False):
+    """Translate MeSH term to Cochrane/Embase/Medline. 
+    If use_llm=False, returns simple static mapping for testing."""
     if term in mesh_cache:
         return mesh_cache[term]
 
-    prompt = f"""
-Translate this MeSH term into equivalent controlled vocabulary terms for multiple databases:
+    if not use_llm:
+        # Updated to match official database formats
+        translation = {
+            "Cochrane": term,
+            "Embase": f"'{term}'/exp",  # Embase uses single quotes and /exp for MeSH
+            "Medline": f"MeSH:{term}"
+        }
+    else:
+        prompt = f"""
+Translate this MeSH term into equivalent controlled vocabulary terms.
 
-MeSH term: {term}
-
-Format the output as JSON with keys: "Cochrane", "Embase", "Scopus", "Web of Science".
-Example:
-
-Input: asthma
-Output: {{"Cochrane": "Asthma", "Embase": "Asthma/exp", "Scopus": "Asthma", "Web of Science": "Respiratory Disease"}}
-
+Return JSON only with keys: "Cochrane", "Embase", "Medline"
 Input: {term}
 Output:
 """
-    result = llm_pipeline(prompt, max_length=200, do_sample=False)
-    # Extract JSON-like output from generated text
-    generated_text = result[0]['generated_text'].split("Output:")[-1].strip()
-    try:
-        translation = eval(generated_text)  # convert string to dict
-    except:
-        translation = {
-            "Cochrane": term,
-            "Embase": term,
-            "Medline": term,
-        
-        }
+        llm = get_llm()
+        result = llm(prompt, max_length=200, do_sample=False)
+        generated = result[0]["generated_text"].split("Output:")[-1].strip()
+        try:
+            translation = json.loads(generated)
+        except json.JSONDecodeError:
+            translation = {
+                "Cochrane": term,
+                "Embase": f"'{term}'/exp",
+                "Medline": f"MeSH:{term}"
+            }
+
     mesh_cache[term] = translation
     return translation
 
-
-# -------------------- Parentheses validation ----------------------
+# -------------------- Query normalization -------------------
 def validate_parentheses(query):
     stack = []
-    for char in query:
-        if char == "(":
-            stack.append(char)
-        elif char == ")":
+    for c in query:
+        if c == "(":
+            stack.append(c)
+        elif c == ")":
             if not stack:
                 return False
             stack.pop()
-    return len(stack) == 0
+    return not stack
 
-
-# -------------------- Normalize query -----------------------------
 def normalize_query(query):
     query = query.strip()
     query = re.sub(r"\s+", " ", query)
-    query = re.sub(r'\b(and|or|not)\b', lambda x: x.group().upper(), query, flags=re.IGNORECASE)
+    query = re.sub(r'\b(and|or|not)\b', lambda m: m.group().upper(), query, flags=re.IGNORECASE)
+    # Fix spacing before brackets and parentheses
+    query = re.sub(r'\(\s+', '(', query)
+    query = re.sub(r'\s+\)', ')', query)
+    query = re.sub(r'\s+(\[[^\]]+\])', r'\1', query)
     return query
 
-
-# -------------------- Tokenization --------------------------------
+# -------------------- Tokenization -------------------------
 def tokenize_query(query):
-    token_pattern = r'\(|\)|\[[^\]]*\]|"[^"]*"|\w+'
-    return re.findall(token_pattern, query)
+    pattern = r'\(|\)|\[[^\]]*\]|"[^"]*"|\w+'
+    return re.findall(pattern, query)
 
-
-# -------------------- Merge consecutive TERMS into PHRASE ---------
 def merge_terms(tokens):
-    merged_tokens = []
+    merged = []
     buffer = []
-
-    for token in tokens:
-        if token in ['AND', 'OR', 'NOT', '(', ')'] or token.startswith('[') or token.startswith('"'):
+    for t in tokens:
+        if t in ['AND', 'OR', 'NOT', '(', ')'] or t.startswith('[') or t.startswith('"'):
             if buffer:
-                merged_tokens.append(' '.join(buffer))
+                merged.append(' '.join(buffer))
                 buffer = []
-            merged_tokens.append(token)
+            merged.append(t)
         else:
-            buffer.append(token)
-
+            buffer.append(t)
     if buffer:
-        merged_tokens.append(' '.join(buffer))
-    return merged_tokens
+        merged.append(' '.join(buffer))
+    return merged
 
-
-# -------------------- Token classification ------------------------
+# -------------------- Token classification -----------------
 def classify_tokens(tokens):
-    token_stream = []
-    for token in tokens:
-        token_type = ''
-        source = ''
+    stream = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        
         if token in ['AND', 'OR', 'NOT']:
-            token_type = 'BOOLEAN'
-            value = token
+            stream.append({"type": "BOOLEAN", "value": token})
         elif token == '(':
-            token_type = 'LPAREN'
-            value = token
+            stream.append({"type": "LPAREN", "value": token})
         elif token == ')':
-            token_type = 'RPAREN'
-            value = token
-        elif re.match(r'\[MeSH Terms\]', token):
-            token_type = 'FIELD_TAG'
-            value = token
-            source = 'MeSH'
-        elif re.match(r'\[[^\]]*\]', token):
-            token_type = 'FIELD_TAG'
-            value = token
+            stream.append({"type": "RPAREN", "value": token})
         elif token.startswith('"') and token.endswith('"'):
-            token_type = 'PHRASE'
-            value = token.strip('"')
+            # Check if next token is a field tag
+            if i + 1 < len(tokens) and tokens[i+1].startswith('['):
+                if tokens[i+1] == '[MeSH Terms]':
+                    stream.append({
+                        "type": "PHRASE", 
+                        "value": token.strip('"'),
+                        "source": "MeSH"
+                    })
+                else:
+                    stream.append({"type": "PHRASE", "value": token.strip('"')})
+                    stream.append({"type": "FIELD_TAG", "value": tokens[i+1]})
+                i += 1  # Skip the field tag
+            else:
+                stream.append({"type": "PHRASE", "value": token.strip('"')})
+        elif token.startswith('['):
+            stream.append({"type": "FIELD_TAG", "value": token})
         else:
-            token_type = 'PHRASE'
-            value = token
-
-        token_dict = {"token": token, "type": token_type, "value": value}
-        if source:
-            token_dict['source'] = source
-        token_stream.append(token_dict)
-    return token_stream
-# -------------------------------------------------------------------
+            # Regular term
+            if i + 1 < len(tokens) and tokens[i+1].startswith('['):
+                if tokens[i+1] == '[MeSH Terms]':
+                    stream.append({
+                        "type": "PHRASE", 
+                        "value": token,
+                        "source": "MeSH"
+                    })
+                else:
+                    stream.append({"type": "PHRASE", "value": token})
+                    stream.append({"type": "FIELD_TAG", "value": tokens[i+1]})
+                i += 1  # Skip the field tag
+            else:
+                stream.append({"type": "PHRASE", "value": token})
+        i += 1
+    return stream
 
 def process_query(query):
     if not validate_parentheses(query):
-        print("Error: Parentheses are not balanced!")
-        return []
-
+        raise ValueError("Unbalanced parentheses")
     query = normalize_query(query)
     tokens = tokenize_query(query)
     tokens = merge_terms(tokens)
     return classify_tokens(tokens)
-# -------------------------------------------------------------------
 
-# -------------------- Database-specific field mapping -------------
-FIELD_MAPPING = {
-    'cochrane': {
-        '[TIAB]': ':ti,ab',
-        '[MeSH Terms]': 'MeSH:',
-    },
-    'medline': {
-        '[TIAB]': ':ti,ab',
-        '[MeSH Terms]': 'MeSH:',
-    },
-    'embase': {
-        '[TIAB]': ':ti,ab',
-        '[MeSH Terms]': '/exp',
-    },
+# -------------------- Database-specific formatting ------------------------
+def format_for_cochrane(token, use_llm=False):
+    """Format token for Cochrane database"""
+    t = token['type']
+    v = token['value']
     
-}
-# -------------------------------------------------------------------
+    if t == 'PHRASE' and token.get('source') == 'MeSH':
+        translation = translate_mesh_term(v, use_llm)
+        return translation.get('Cochrane', v)
+    elif t == 'PHRASE':
+        return f'"{v}"'
+    elif t == 'FIELD_TAG':
+        if v == '[TI]':
+            return ':ti'
+        elif v == '[AB]':
+            return ':ab'
+        elif v == '[TIAB]':
+            return ':ti,ab'
+        elif v == '[MeSH Terms]':
+            return 'MeSH:'
+    elif t in ['BOOLEAN', 'LPAREN', 'RPAREN']:
+        return v
+    return v
+def format_for_embase(token, use_llm=False):
+    """Format token for Embase database - single quotes and no space before colon"""
+    t = token['type']
+    v = token['value']
+    
+    if t == 'PHRASE' and token.get('source') == 'MeSH':
+        translation = translate_mesh_term(v, use_llm)
+        return translation.get('Embase', f"'{v}'/exp")
+    elif t == 'PHRASE':
+        # Embase uses single quotes for phrases
+        return f"'{v}'"
+    elif t == 'FIELD_TAG':
+        # Remove space before colon
+        if v == '[TI]':
+            return ':ti'
+        elif v == '[AB]':
+            return ':ab'
+        elif v == '[TIAB]':
+            return ':ti,ab,kw'  # add :kw for keywords
+        elif v == '[MeSH Terms]':
+            return '/exp'
+    elif t in ['BOOLEAN', 'LPAREN', 'RPAREN']:
+        return v
+    return v
 
-def map_token_to_db(token, db):
-    ttype = token['type']
-    value = token['value']
 
-    # ----------------- Semantic translation for MeSH terms ----------
-    if ttype == 'PHRASE' and token.get('source') == 'MeSH':
-        translation = translate_mesh_term(value)
-        return translation.get(db.capitalize(), value)
-    # ----------------------------------------------------------------
 
-    if ttype == 'PHRASE':
-        if db == 'embase':
-            return f"'{value}'"
-        else:
-            return f'"{value}"'
-    elif ttype == 'FIELD_TAG':
-        return FIELD_MAPPING.get(db, {}).get(value, value)
-    elif ttype == 'BOOLEAN':
-        return value
-    elif ttype in ['LPAREN', 'RPAREN']:
-        return value
+def format_for_medline(token, use_llm=False):
+    """Format token for MEDLINE/PubMed"""
+    t = token['type']
+    v = token['value']
+    
+    if t == 'PHRASE' and token.get('source') == 'MeSH':
+        translation = translate_mesh_term(v, use_llm)
+        return translation.get('Medline', f"MeSH:{v}")
+    elif t == 'PHRASE':
+        return f'"{v}"'
+    elif t == 'FIELD_TAG':
+        if v == '[TI]':
+            return ':ti'
+        elif v == '[AB]':
+            return ':ab'
+        elif v == '[TIAB]':
+            return ':ti,ab'
+        elif v == '[MeSH Terms]':
+            return 'MeSH:'
+    elif t in ['BOOLEAN', 'LPAREN', 'RPAREN']:
+        return v
+    return v
+
+# -------------------- Query reconstruction -----------------
+def reconstruct_query(tokens, db, use_llm=False):
+    """Reconstruct query for specific database"""
+    if db == 'cochrane':
+        formatter = format_for_cochrane
+    elif db == 'embase':
+        formatter = format_for_embase
+    elif db == 'medline':
+        formatter = format_for_medline
     else:
-        if db == 'embase':
-            return f"'{value}'"
+        formatter = format_for_cochrane
+    
+    parts = []
+    for token in tokens:
+        part = formatter(token, use_llm)
+        # For Embase, remove space before colon for field tags
+        if db == 'embase' and part.startswith(':') and parts:
+            # attach colon directly to previous token (phrase)
+            parts[-1] = f"{parts[-1]}{part}"
         else:
-            return f'"{value}"'
+            parts.append(part)
+    
+    return ' '.join(parts)
 
-def reconstruct_query(tokens, db):
-    mapped_tokens = [map_token_to_db(t, db) for t in tokens]
-    return ' '.join(mapped_tokens)
-# -------------------------------------------------------------------
 
-# -------------------- Main program --------------------------------
+# -------------------- Main ---------------------------------
 if __name__ == "__main__":
-    user_query = input("Enter PubMed query: ")
-
-    structured_tokens = process_query(user_query)
-
-    outputs = {}
-    for db in ['cochrane', 'embase', 'medline']:
-        outputs[db] = reconstruct_query(structured_tokens, db)
-
-    print("\nTranslated Queries:")
-    for db, q in outputs.items():
-        print(f"{db.upper()}: {q}")
-# -------------------------------------------------------------------
+    try:
+        user_query = input("Enter PubMed query: ")
+        tokens = process_query(user_query)
+        print("\nTranslated Queries:")
+        
+        print(f"COCHRANE: {reconstruct_query(tokens, 'cochrane', use_llm=False)}")
+        print(f"EMBASE: {reconstruct_query(tokens, 'embase', use_llm=False)}")
+        print(f"MEDLINE: {reconstruct_query(tokens, 'medline', use_llm=False)}")
+        
+    except Exception as e:
+        print(f"Error: {e}")
