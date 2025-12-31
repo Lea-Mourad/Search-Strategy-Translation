@@ -35,7 +35,7 @@ def translate_mesh_term(term, use_llm=False):
         translation = {
             "Cochrane": term,
             "Embase": f"'{term}'/exp",  # Embase uses single quotes and /exp for MeSH
-            "Medline": f"MeSH:{term}"
+            "Medline": term
         }
     else:
         prompt = f"""
@@ -181,6 +181,7 @@ def format_for_cochrane(token, use_llm=False):
     elif t in ['BOOLEAN', 'LPAREN', 'RPAREN']:
         return v
     return v
+
 def format_for_embase(token, use_llm=False):
     """Format token for Embase database - single quotes and no space before colon"""
     t = token['type']
@@ -209,31 +210,44 @@ def format_for_embase(token, use_llm=False):
 
 
 def format_for_medline(token, use_llm=False):
-    """Format token for MEDLINE/PubMed"""
+    """Format token for MEDLINE (Ovid)"""
+    
     t = token['type']
     v = token['value']
-    
+
+    # MeSH terms
     if t == 'PHRASE' and token.get('source') == 'MeSH':
         translation = translate_mesh_term(v, use_llm)
-        return translation.get('Medline', f"MeSH:{v}")
+
+        # Prefer exploded MeSH if available
+        medline_term = translation.get('Medline', v)
+        return f"exp {medline_term}/"
+
+    # Free-text phrases
     elif t == 'PHRASE':
         return f'"{v}"'
+
+    # Field tags → Ovid syntax
     elif t == 'FIELD_TAG':
         if v == '[TI]':
-            return ':ti'
+            return '.ti.'
         elif v == '[AB]':
-            return ':ab'
+            return '.ab.'
         elif v == '[TIAB]':
-            return ':ti,ab'
+            return '.ti,ab.'
         elif v == '[MeSH Terms]':
-            return 'MeSH:'
+            # handled via PHRASE + source == MeSH
+            return ''
+
+    # Boolean logic & parentheses
     elif t in ['BOOLEAN', 'LPAREN', 'RPAREN']:
         return v
+
     return v
+
 
 # -------------------- Query reconstruction -----------------
 def reconstruct_query(tokens, db, use_llm=False):
-    """Reconstruct query for specific database"""
     if db == 'cochrane':
         formatter = format_for_cochrane
     elif db == 'embase':
@@ -242,18 +256,20 @@ def reconstruct_query(tokens, db, use_llm=False):
         formatter = format_for_medline
     else:
         formatter = format_for_cochrane
-    
+
     parts = []
+
     for token in tokens:
         part = formatter(token, use_llm)
-        # For Embase, remove space before colon for field tags
-        if db == 'embase' and part.startswith(':') and parts:
-            # attach colon directly to previous token (phrase)
+
+        # Attach field tags directly to previous phrase
+        if part.startswith((':', '.')) and parts:
             parts[-1] = f"{parts[-1]}{part}"
         else:
             parts.append(part)
-    
-    return ' '.join(parts)
+
+    return ' '.join(p for p in parts if p)
+
 
 
 # -------------------- Main ---------------------------------
