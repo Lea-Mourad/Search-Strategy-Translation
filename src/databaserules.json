@@ -1,0 +1,47 @@
+{
+  "pubmed": {
+    "quote": "\"",
+    "fields": {
+      "[TI]": "[Title]",
+      "[AB]": "[Abstract]",
+      "[TIAB]": "[Title/Abstract]"
+    },
+    "mesh": {
+      "explode_prefix": "",
+      "suffix": "[MeSH Term]"
+    }
+  },
+  
+    "cochrane": {
+      "quote": "\"",
+      "fields": {
+        "[TIAB]": ":ti,ab"
+      },
+      "mesh": {
+        "suffix": ""  
+      }
+    },
+    "embase": {
+      "quote": "'",
+      "fields": {
+        "[TIAB]": ":ti,ab,kw"
+      },
+      "mesh": {
+        "suffix": "/exp",
+        "quote_mesh": true
+      }
+    },
+    "medline": {
+      "quote": "\"",
+      "fields": {
+        "[TIAB]": ".ti,ab."
+      },
+      "mesh": {
+        "explode_prefix": "exp ",
+        "suffix": "/"
+      }
+    }
+  
+  
+  
+}
