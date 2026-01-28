@@ -4,44 +4,74 @@
     "fields": {
       "[TI]": "[Title]",
       "[AB]": "[Abstract]",
-      "[TIAB]": "[Title/Abstract]"
+      "[TIAB]": "[Title/Abstract]",
+      "[TW]": "[Text Word]",
+      "[MH]": "[MeSH Terms]",
+      "[MAJR]": "[MeSH Major Topic]",
+      "[SH]": "[MeSH Subheading]",
+      "[OT]": "[Other Term]",
+      "[PG]": "[Pagination]",
+      "[PA]": "[Pharmacological Action]",
+      "[PT]": "[Publication Type]",
+      "[PB]": "[Publisher]",
+      "[SI]": "[Secondary Source ID]",
+      "[PS]": "[Subject Personal Name]",
+      "[NM]": "[Supplementary Concept]",
+      "[TT]": "[Transliterated Title]",
+      "[VI]": "[Volume]"
     },
     "mesh": {
       "explode_prefix": "",
       "suffix": "[MeSH Term]"
     }
   },
-  
-    "cochrane": {
-      "quote": "\"",
-      "fields": {
-        "[TIAB]": ":ti,ab"
-      },
-      "mesh": {
-        "suffix": ""  
-      }
+
+  "cochrane": {
+    "quote": "\"",
+    "fields": {
+      "[TI]": ":ti",
+      "[AB]": ":ab",
+      "[TIAB]": ":ti,ab",
+      "[PT]": ":pt",
+      "[AU]": ":au"
     },
-    "embase": {
-      "quote": "'",
-      "fields": {
-        "[TIAB]": ":ti,ab,kw"
-      },
-      "mesh": {
-        "suffix": "/exp",
-        "quote_mesh": true
-      }
-    },
-    "medline": {
-      "quote": "\"",
-      "fields": {
-        "[TIAB]": ".ti,ab."
-      },
-      "mesh": {
-        "explode_prefix": "exp ",
-        "suffix": "/"
-      }
+    "mesh": {
+      "suffix": ""
     }
-  
-  
-  
+  },
+
+  "embase": {
+    "quote": "'",
+    "fields": {
+      "[TI]": ":ti",
+    "[AB]": ":ab",
+    "[TIAB]": ":ti,ab,kw",
+    "[TW]": ":tw",
+    "[AU]": ":au",
+    "[KW]": ":kw",
+    "[PT]": ":pt",
+    "[MH]": "/exp",
+    "[MAJR]": "/exp/mj"
+    },
+    "mesh": {
+      "suffix": "/exp",
+      "quote_mesh": true
+    },
+    "unsupported_fields": ["[PA]", "[SH]", "[NM]"]  
+  },
+
+  "medline": {
+    "quote": "\"",
+    "fields": {
+      "[TI]": ".ti.",
+      "[AB]": ".ab.",
+      "[TIAB]": ".ti,ab.",
+      "[TW]": ".tw.",
+      "[PT]": ".pt."
+    },
+    "mesh": {
+      "explode_prefix": "exp ",
+      "suffix": "/"
+    }
+  }
 }

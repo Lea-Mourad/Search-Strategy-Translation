@@ -4,21 +4,66 @@ import nltk
 
 nltk.download("punkt", quiet=True)
 
-# -------------------- Load DB rules --------------------
+# ==================== Load DB rules ====================
 with open("databaserules.json", "r") as f:
     DB_RULES = json.load(f)
 
-# -------------------- Extract all field tags and MeSH dynamically --------------------
-ALL_FIELDS = {}
+# ==================== Field aliases ====================
+FIELD_ALIASES = {
+    # Title / Abstract
+    "[title]": "[TI]",
+    "[ti]": "[TI]",
+    "[abstract]": "[AB]",
+    "[ab]": "[AB]",
+    "[title/abstract]": "[TIAB]",
+    "[tiab]": "[TIAB]",
 
-for db in DB_RULES.values():
-    for key, value in db.get("fields", {}).items():
-        ALL_FIELDS[key.lower()] = key          # [tiab]
-        ALL_FIELDS[value.lower()] = key        # [title/abstract]
+    # Text word
+    "[text word]": "[TW]",
+    "[tw]": "[TW]",
 
+    # MeSH
+    "[mesh]": "[MH]",
+    "[mesh term]": "[MH]",
+    "[mesh terms]": "[MH]",
+    "[mh]": "[MH]",
 
+    "[mesh major topic]": "[MAJR]",
+    "[major topic]": "[MAJR]",
+    "[majr]": "[MAJR]",
 
-# -------------------- Query validation --------------------
+    "[mesh subheading]": "[SH]",
+    "[subheading]": "[SH]",
+    "[sh]": "[SH]",
+
+    "[supplementary concept]": "[NM]",
+    "[nm]": "[NM]",
+
+    "[pharmacological action]": "[PA]",
+    "[pa]": "[PA]",
+
+    # Other fields
+    "[other term]": "[OT]",
+    "[ot]": "[OT]",
+    "[pagination]": "[PG]",
+    "[pg]": "[PG]",
+    "[publication type]": "[PT]",
+    "[pt]": "[PT]",
+    "[publisher]": "[PB]",
+    "[pb]": "[PB]",
+    "[secondary source id]": "[SI]",
+    "[si]": "[SI]",
+    "[subject personal name]": "[PS]",
+    "[ps]": "[PS]",
+    "[transliterated title]": "[TT]",
+    "[tt]": "[TT]",
+    "[volume]": "[VI]",
+    "[vi]": "[VI]"
+}
+
+ALL_FIELDS = {k: v for k, v in FIELD_ALIASES.items()}
+
+# ==================== Validation ====================
 def validate_parentheses(query):
     stack = []
     for c in query:
@@ -30,7 +75,7 @@ def validate_parentheses(query):
             stack.pop()
     return not stack
 
-# -------------------- Query normalization --------------------
+# ==================== Normalization ====================
 def normalize_query(query):
     query = query.strip()
     query = re.sub(r"\s+", " ", query)
@@ -44,27 +89,12 @@ def normalize_query(query):
     query = re.sub(r"\s+\)", ")", query)
     return query
 
-# -------------------- Tokenization --------------------
+# ==================== Tokenization ====================
 def tokenize_query(query):
     pattern = r'\(|\)|"[^"]*"|\[[^\]]*\]|\w+'
     return re.findall(pattern, query)
 
-def merge_terms(tokens):
-    merged = []
-    buffer = []
-    for t in tokens:
-        if t.upper() in ["AND", "OR", "NOT"] or t in ["(", ")"] or t.startswith("[") or t.startswith('"'):
-            if buffer:
-                merged.append(" ".join(buffer))
-                buffer = []
-            merged.append(t)
-        else:
-            buffer.append(t)
-    if buffer:
-        merged.append(" ".join(buffer))
-    return merged
-
-# -------------------- Dynamic Token Classification --------------------
+# ==================== Classification ====================
 def classify_tokens(tokens):
     stream = []
     i = 0
@@ -94,15 +124,14 @@ def classify_tokens(tokens):
         field = None
         source = None
 
-        # Lookahead for field or MeSH
+        # Lookahead for field
         if i + 1 < len(tokens) and tokens[i + 1].startswith("["):
             tag = tokens[i + 1].lower()
 
             if tag in ALL_FIELDS:
                 field = ALL_FIELDS[tag]
-                i += 1
-            elif "mesh" in tag:
-                source = "MeSH"
+                if field in ["[MH]", "[MAJR]", "[SH]", "[NM]"]:
+                    source = "MeSH"
                 i += 1
 
         stream.append({
@@ -113,23 +142,14 @@ def classify_tokens(tokens):
         })
 
         i += 1
-        
 
     return stream
 
-
-def process_query(query):
-    if not validate_parentheses(query):
-        raise ValueError("Unbalanced parentheses")
-    query = normalize_query(query)
-    tokens = tokenize_query(query)
-    tokens = merge_terms(tokens)
-    return classify_tokens(tokens)
-
-# -------------------- Generic Formatter --------------------
+# ==================== Formatter ====================
 def format_token(token, db):
     rules = DB_RULES[db]
     quote = rules.get("quote", '"')
+
     t = token["type"]
     v = token["value"]
 
@@ -139,40 +159,89 @@ def format_token(token, db):
     if t == "PHRASE":
         field = token.get("field")
         source = token.get("source")
+        
+        # Skip unsupported fields completely
+        unsupported = rules.get("unsupported_fields", [])
+        if field in unsupported:
+            return None
 
-        # MeSH handling
+        db_fields = rules.get("fields", {})
+
+        # ---------- MeSH handling ----------
         if source == "MeSH":
-            mesh_rules = rules.get("mesh", {})
-            prefix = mesh_rules.get("explode_prefix", "")
-            suffix = mesh_rules.get("explode_suffix", mesh_rules.get("suffix", ""))
-            quote_mesh = mesh_rules.get("quote_mesh", False)
+            if field not in db_fields:
+                # Downgrade unsupported MeSH to free text
+                return f"{quote}{v}{quote}"
+
+            # Use DB-specific suffix for MeSH
+            suffix = db_fields[field]  # e.g., /exp or /exp/mj
+            prefix = rules.get("mesh", {}).get("explode_prefix", "")
+            quote_mesh = rules.get("mesh", {}).get("quote_mesh", False)
+
             if quote_mesh:
-                # Only quote the term, leave suffix outside
                 return f"{quote}{prefix}{v}{quote}{suffix}"
             else:
                 return f"{prefix}{v}{suffix}"
 
-        # Free text with optional field tag
+        # ---------- Free text ----------
         text = f"{quote}{v}{quote}"
-        if field:
-            text += rules["fields"].get(field, "")
+        if field and field in db_fields:
+            text += db_fields[field]
+
         return text
 
     return v
 
-# -------------------- Query Reconstruction --------------------
+# ==================== Reconstruction ====================
 def reconstruct_query(tokens, db):
     parts = []
-    for token in tokens:
-        part = format_token(token, db)
-        # Attach directly to previous token if starts with : or .
-        if part.startswith((':', '.')) and parts:
-            parts[-1] = f"{parts[-1]}{part}"
-        else:
-            parts.append(part)
-    return " ".join(p for p in parts if p)
+    token_count = len(tokens)
 
-# -------------------- Main --------------------
+    for i, token in enumerate(tokens):
+        part = format_token(token, db)
+
+        if part is None:
+            # Skip the token and remove booleans around it
+            # Remove previous boolean if it exists
+            if parts and parts[-1].upper() in ["AND", "OR", "NOT"]:
+                parts.pop()
+            # Skip next token if it’s a boolean
+            if i + 1 < token_count:
+                next_token = tokens[i + 1]
+                next_part = format_token(next_token, db)
+                if next_part and next_part.upper() in ["AND", "OR", "NOT"]:
+                    # Skip next boolean by incrementing i in loop
+                    tokens[i + 1]["skip"] = True
+            continue
+
+        if token.get("skip"):
+            continue
+
+        # Avoid repeated booleans
+        if parts and parts[-1].upper() in ["AND", "OR", "NOT"] and part.upper() in ["AND", "OR", "NOT"]:
+            continue
+
+        parts.append(part)
+
+    # Clean up dangling booleans at start or end
+    while parts and parts[0].upper() in ["AND", "OR", "NOT"]:
+        parts.pop(0)
+    while parts and parts[-1].upper() in ["AND", "OR", "NOT"]:
+        parts.pop()
+
+    return " ".join(parts)
+
+
+# ==================== Pipeline ====================
+def process_query(query):
+    if not validate_parentheses(query):
+        raise ValueError("Unbalanced parentheses")
+
+    query = normalize_query(query)
+    tokens = tokenize_query(query)
+    return classify_tokens(tokens)
+
+# ==================== Main ====================
 if __name__ == "__main__":
     try:
         user_query = input("Enter PubMed query: ")
