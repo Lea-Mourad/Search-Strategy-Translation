@@ -10,17 +10,13 @@ with open("databaserules.json", "r") as f:
 
 # -------------------- Extract all field tags and MeSH dynamically --------------------
 ALL_FIELDS = {}
-MESH_FIELDS = []
 
-for db_name, db in DB_RULES.items():
-    fields = db.get("fields", {})
-    for k in fields.keys():
-        ALL_FIELDS[k.lower()] = k  # lowercase for easy matching
-    mesh = db.get("mesh", {})
-    suffix = mesh.get("suffix")
-    if suffix:
-        MESH_FIELDS.append(suffix.lower())
-    # optional: detect MeSH from JSON if needed
+for db in DB_RULES.values():
+    for key, value in db.get("fields", {}).items():
+        ALL_FIELDS[key.lower()] = key          # [tiab]
+        ALL_FIELDS[value.lower()] = key        # [title/abstract]
+
+
 
 # -------------------- Query validation --------------------
 def validate_parentheses(query):
@@ -50,8 +46,7 @@ def normalize_query(query):
 
 # -------------------- Tokenization --------------------
 def tokenize_query(query):
-    # Match parentheses, field tags, quoted phrases, or words
-    pattern = r'\(|\)|\[[^\]]*\]|"[^"]*"|\w+'
+    pattern = r'\(|\)|"[^"]*"|\[[^\]]*\]|\w+'
     return re.findall(pattern, query)
 
 def merge_terms(tokens):
@@ -73,35 +68,55 @@ def merge_terms(tokens):
 def classify_tokens(tokens):
     stream = []
     i = 0
+
     while i < len(tokens):
         token = tokens[i]
 
+        # Boolean operators
         if token.upper() in ["AND", "OR", "NOT"]:
             stream.append({"type": "BOOLEAN", "value": token})
-        elif token == "(":
+            i += 1
+            continue
+
+        # Parentheses
+        if token == "(":
             stream.append({"type": "LPAREN", "value": token})
-        elif token == ")":
+            i += 1
+            continue
+
+        if token == ")":
             stream.append({"type": "RPAREN", "value": token})
-        else:
-            field = None
-            source = None
+            i += 1
+            continue
 
-            # Check if next token is a field or MeSH
-            if i + 1 < len(tokens):
-                next_token_lc = tokens[i + 1].lower()
-                if next_token_lc in ALL_FIELDS:
-                    field = ALL_FIELDS[next_token_lc]
-                    i += 1
-                elif next_token_lc.startswith("[mesh"):
-                    source = "MeSH"
-                    i += 1
+        # Term / Phrase
+        phrase = token.strip('"')
+        field = None
+        source = None
 
-            # Remove quotes from token
-            phrase = token.strip('"')
-            stream.append({"type": "PHRASE", "value": phrase, "field": field, "source": source})
+        # Lookahead for field or MeSH
+        if i + 1 < len(tokens) and tokens[i + 1].startswith("["):
+            tag = tokens[i + 1].lower()
+
+            if tag in ALL_FIELDS:
+                field = ALL_FIELDS[tag]
+                i += 1
+            elif "mesh" in tag:
+                source = "MeSH"
+                i += 1
+
+        stream.append({
+            "type": "PHRASE",
+            "value": phrase,
+            "field": field,
+            "source": source
+        })
 
         i += 1
+        
+
     return stream
+
 
 def process_query(query):
     if not validate_parentheses(query):
