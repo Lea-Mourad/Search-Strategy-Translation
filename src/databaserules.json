@@ -37,7 +37,7 @@
     },
     "mesh": {
       "suffix": ""
-    }
+    }, "unsupported_fields": ["[PA]", "[SH]", "[NM]"]  
   },
 
   "embase": {
@@ -67,11 +67,15 @@
       "[AB]": ".ab.",
       "[TIAB]": ".ti,ab.",
       "[TW]": ".tw.",
-      "[PT]": ".pt."
+      "[PT]": ".pt.",
+      "[MAJR]": "*/",
+      "[PA]": "/pa"
+     
     },
     "mesh": {
-      "explode_prefix": "exp ",
+      "explode_prefix": "exp",
       "suffix": "/"
-    }
+    },
+    "unsupported_fields": ["[PA]", "[SH]", "[NM]"]  
   }
 }

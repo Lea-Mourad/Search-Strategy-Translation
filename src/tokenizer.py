@@ -99,51 +99,67 @@ def classify_tokens(tokens):
     stream = []
     i = 0
 
+    def is_boolean(tok):
+        return tok.upper() in ["AND", "OR", "NOT"]
+
+    def is_paren(tok):
+        return tok in ["(", ")"]
+
+    def is_field(tok):
+        return tok.startswith("[") and tok.endswith("]")
+
     while i < len(tokens):
-        token = tokens[i]
+        tok = tokens[i]
 
-        # Boolean operators
-        if token.upper() in ["AND", "OR", "NOT"]:
-            stream.append({"type": "BOOLEAN", "value": token})
+        # Boolean / parentheses
+        if is_boolean(tok):
+            stream.append({"type": "BOOLEAN", "value": tok.upper()})
+            i += 1
+            continue
+        if tok == "(":
+            stream.append({"type": "LPAREN", "value": tok})
+            i += 1
+            continue
+        if tok == ")":
+            stream.append({"type": "RPAREN", "value": tok})
             i += 1
             continue
 
-        # Parentheses
-        if token == "(":
-            stream.append({"type": "LPAREN", "value": token})
-            i += 1
-            continue
-
-        if token == ")":
-            stream.append({"type": "RPAREN", "value": token})
-            i += 1
-            continue
-
-        # Term / Phrase
-        phrase = token.strip('"')
+        # Term/phrase (quoted OR unquoted words possibly multiword)
+        term_parts = []
         field = None
         source = None
 
-        # Lookahead for field
-        if i + 1 < len(tokens) and tokens[i + 1].startswith("["):
-            tag = tokens[i + 1].lower()
+        # If it's a quoted phrase, keep it as one unit
+        if tok.startswith('"') and tok.endswith('"'):
+            term_parts = [tok.strip('"')]
+            i += 1
+        else:
+            # Collect consecutive word tokens into one term
+            while i < len(tokens) and (not is_boolean(tokens[i])) and (not is_paren(tokens[i])) and (not is_field(tokens[i])) and (not (tokens[i].startswith('"') and tokens[i].endswith('"'))):
+                term_parts.append(tokens[i])
+                i += 1
 
+            # If next token is a quoted phrase, treat it separately (rare edge case)
+            if i < len(tokens) and tokens[i].startswith('"') and tokens[i].endswith('"'):
+                # flush collected words first
+                pass
+
+        phrase = " ".join(term_parts).strip()
+
+        # Attach field tag if it comes next
+        if i < len(tokens) and is_field(tokens[i]):
+            tag = tokens[i].lower()
             if tag in ALL_FIELDS:
                 field = ALL_FIELDS[tag]
                 if field in ["[MH]", "[MAJR]", "[SH]", "[NM]"]:
                     source = "MeSH"
-                i += 1
+                i += 1  # consume the field tag
 
-        stream.append({
-            "type": "PHRASE",
-            "value": phrase,
-            "field": field,
-            "source": source
-        })
-
-        i += 1
+        stream.append({"type": "PHRASE", "value": phrase, "field": field, "source": source})
 
     return stream
+
 
 # ==================== Formatter ====================
 def format_token(token, db):
@@ -168,13 +184,23 @@ def format_token(token, db):
         db_fields = rules.get("fields", {})
 
         # ---------- MeSH handling ----------
+               # ---------- MeSH handling ----------
         if source == "MeSH":
+
+            # ✅ OVID MEDLINE FIX (ONLY)
+            if db.lower() == "medline":
+                # Major Topic = leading *
+                if field == "[MAJR]":
+                    return f"*{v.title()}/"
+                else:
+                    return f"{v.title()}/"
+
+            # ---- all other databases UNCHANGED ----
             if field not in db_fields:
                 # Downgrade unsupported MeSH to free text
                 return f"{quote}{v}{quote}"
 
-            # Use DB-specific suffix for MeSH
-            suffix = db_fields[field]  # e.g., /exp or /exp/mj
+            suffix = db_fields[field]
             prefix = rules.get("mesh", {}).get("explode_prefix", "")
             quote_mesh = rules.get("mesh", {}).get("quote_mesh", False)
 
@@ -182,6 +208,8 @@ def format_token(token, db):
                 return f"{quote}{prefix}{v}{quote}{suffix}"
             else:
                 return f"{prefix}{v}{suffix}"
+
+
 
         # ---------- Free text ----------
         text = f"{quote}{v}{quote}"
@@ -192,29 +220,27 @@ def format_token(token, db):
 
     return v
 
-# ==================== Reconstruction ====================
 def reconstruct_query(tokens, db):
     parts = []
+    skip_indices = set()
     token_count = len(tokens)
 
     for i, token in enumerate(tokens):
+        if i in skip_indices:
+            continue
+
         part = format_token(token, db)
 
         if part is None:
             # Skip the token and remove booleans around it
-            # Remove previous boolean if it exists
             if parts and parts[-1].upper() in ["AND", "OR", "NOT"]:
                 parts.pop()
-            # Skip next token if it’s a boolean
+
+            # Skip next token if it’s a boolean (without mutating tokens)
             if i + 1 < token_count:
                 next_token = tokens[i + 1]
-                next_part = format_token(next_token, db)
-                if next_part and next_part.upper() in ["AND", "OR", "NOT"]:
-                    # Skip next boolean by incrementing i in loop
-                    tokens[i + 1]["skip"] = True
-            continue
-
-        if token.get("skip"):
+                if next_token["type"] == "BOOLEAN":
+                    skip_indices.add(i + 1)
             continue
 
         # Avoid repeated booleans
@@ -230,6 +256,7 @@ def reconstruct_query(tokens, db):
         parts.pop()
 
     return " ".join(parts)
+
 
 
 # ==================== Pipeline ====================
